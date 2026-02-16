@@ -1,121 +1,84 @@
-name: CI/CD pipeline for Tomcat (DEV, TEST, PRE-PROD, PROD)
+
+name: CI-CD Pipeline to ECS
 
 on:
   push:
     branches:
       - master
+  workflow_dispatch:
 
 jobs:
-  build:
+  build-and-deploy:
     runs-on: ubuntu-latest
 
     steps:
-      - name: checkout code
-        uses: actions/checkout@v3
 
-      - name: set-up jdk
-        uses: actions/setup-java@v3
-        with:
-          distribution: temurin
-          java-version: '17'
+    # 1. Checkout source
+    # 1️⃣ Checkout source
+    - name: Checkout Code
+      uses: actions/checkout@v4
 
-      - name: validate with maven
-        run: mvn validate
+    # 2. Setup Java (REQUIRED for Maven build)
+    # 2️⃣ Setup Java 17
+    - name: Set up JDK 17
+      uses: actions/setup-java@v3
+      with:
+        java-version: '17'
+        distribution: 'temurin'
 
-      - name: compile with maven
-        run: mvn compile
+    # 3. Build WAR file (YOU WERE MISSING THIS)
+    # 3️⃣ Build WAR file
+    - name: Build Application
+      run: mvn clean package
 
-      - name: test with maven
-        run: mvn test
+    # 4. Configure AWS Credentials
+    # 4️⃣ Configure AWS credentials
+    - name: Configure AWS Credentials
+      uses: aws-actions/configure-aws-credentials@v4
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
 
-      - name: package with maven
-        run: mvn clean package
+    # 5. Login to Amazon ECR
+    # 5️⃣ Login to Amazon ECR
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v2
 
-      - name: verify WAR file
-        run: ls -lh target/
+    # 6. Build Docker Image
+    # 6️⃣ Build Docker Image
+    - name: Build Docker Image
+      run: |
+        docker build -t ${{ secrets.ECR_REPOSITORY }} .
+        docker build -t app-image:latest .
 
-      - name: upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: war-file
-          path: target/*.war
+    # 7. Tag Docker Image
+    # 7️⃣ Tag Docker Image
+    - name: Tag Docker Image
+      run: |
+        docker tag ${{ secrets.ECR_REPOSITORY }}:latest \
+        docker tag app-image:latest \
+        ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
 
-  # --------------------------------------------------------------------
-  # DEPLOY TO DEV
-  # --------------------------------------------------------------------
-  deploy-dev:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: download war
-        uses: actions/download-artifact@v4
-        with:
-          name: war-file
+    # 8. Push Image to ECR
+    # 8️⃣ Push Image to ECR
+    - name: Push Image to ECR
+      run: |
+        docker push \
+        ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPOSITORY }}:latest
 
-      - name: Deploy to Tomcat (DEV)
-        run: |
-          WAR=$(ls *.war | head -n 1)
-          echo "Deploying $WAR to DEV"
-          curl -v -u "${{ secrets.TOMCAT_USER_DEV }}:${{ secrets.TOMCAT_PASSWORD_DEV }}" \
-          -T "$WAR" \
-          "http://${{ secrets.TOMCAT_HOST_DEV }}:8080/manager/text/deploy?path=/TrainBook&update=true"
+    # 9. Deploy to ECS
+    # 9️⃣ Deploy to ECS
+    - name: Deploy to ECS
+      run: |
+        echo "Cluster: ${{ secrets.ECS_CLUSTER }}"
+        echo "Service: ${{ secrets.ECS_SERVICE }}"
 
-  # --------------------------------------------------------------------
-  # DEPLOY TO TEST
-  # --------------------------------------------------------------------
-  deploy-test:
-    needs: deploy-dev
-    runs-on: ubuntu-latest
-    steps:
-      - name: download war
-        uses: actions/download-artifact@v4
-        with:
-          name: war-file
-
-      - name: Deploy to Tomcat (TEST)
-        run: |
-          WAR=$(ls *.war | head -n 1)
-          echo "Deploying $WAR to TEST"
-          curl -v -u "${{ secrets.TOMCAT_USER_TEST }}:${{ secrets.TOMCAT_PASSWORD_TEST }}" \
-          -T "$WAR" \
-          "http://${{ secrets.TOMCAT_HOST_TEST }}:8080/manager/text/deploy?path=/TrainBook&update=true"
-
-  # --------------------------------------------------------------------
-  # DEPLOY TO PRE-PROD
-  # --------------------------------------------------------------------
-  deploy-preprod:
-    needs: deploy-test
-    runs-on: ubuntu-latest
-    steps:
-      - name: download war
-        uses: actions/download-artifact@v4
-        with:
-          name: war-file
-
-      - name: Deploy to Tomcat (PRE-PROD)
-        run: |
-          WAR=$(ls *.war | head -n 1)
-          echo "Deploying $WAR to PRE-PROD"
-          curl -v -u "${{ secrets.TOMCAT_USER_PRE_PROD }}:${{ secrets.TOMCAT_PASSWORD_PRE_PROD }}" \
-          -T "$WAR" \
-          "http://${{ secrets.TOMCAT_HOST_PRE_PROD }}:8080/manager/text/deploy?path=/TrainBook&update=true"
-
-  # --------------------------------------------------------------------
-  # DEPLOY TO PROD
-  # --------------------------------------------------------------------
-  deploy-prod:
-    needs: deploy-preprod
-    runs-on: ubuntu-latest
-    steps:
-      - name: download war
-        uses: actions/download-artifact@v4
-        with:
-          name: war-file
-
-      - name: Deploy to Tomcat (PROD)
-        run: |
-          WAR=$(ls *.war | head -n 1)
-          echo "Deploying $WAR to PROD"
-          curl -v -u "${{ secrets.TOMCAT_USER_PROD }}:${{ secrets.TOMCAT_PASSWORD_PROD }}" \
-          -T "$WAR" \
-          "http://${{ secrets.TOMCAT_HOST_PROD }}:8080/manager/text/deploy?path=/TrainBook&update=true"
+        aws ecs update-service \
+        --cluster ${{ secrets.ECS_CLUSTER }} \
+        --service ${{ secrets.ECS_SERVICE }} \
+        --force-new-deployment
+          --cluster "${{ secrets.ECS_CLUSTER }}" \
+          --service "${{ secrets.ECS_SERVICE }}" \
+          --force-new-deployment
